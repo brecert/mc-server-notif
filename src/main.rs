@@ -1,10 +1,45 @@
 #![feature(drain_filter)]
 #![feature(string_remove_matches)]
 #![feature(iter_intersperse)]
+#![feature(scoped_threads)]
 use std::{collections::HashSet, net::TcpStream, thread, time::Duration};
 
-use craftping::sync::ping;
+use craftping::{sync::ping, Response};
 use notify_rust::Notification;
+
+#[cfg(target_os = "linux")]
+use tao::platform::linux::SystemTrayBuilderExtLinux;
+use tao::{
+    event::{Event, TrayEvent},
+    event_loop::{ControlFlow, EventLoop},
+    menu::{ContextMenu as Menu, MenuId, MenuItemAttributes, MenuType},
+    system_tray::SystemTrayBuilder,
+};
+
+fn ping_server(hostname: &str, port: u16) -> Response {
+    let mut stream = TcpStream::connect((hostname.as_ref(), port)).unwrap();
+    let pong = ping(&mut stream, &hostname, port).expect("Cannot ping server");
+    pong
+}
+
+fn create_menu(pong: Response) -> (tao::menu::ContextMenu, MenuId) {
+    let mut tray_menu = Menu::new();
+
+    let server_count = tray_menu.add_item(MenuItemAttributes::new(&format!(
+        "{} / {}",
+        pong.online_players, pong.max_players
+    )));
+
+    if let Some(sample) = pong.sample {
+        for player in sample {
+            tray_menu.add_item(MenuItemAttributes::new(&player.name).with_enabled(false));
+        }
+    }
+
+    tray_menu.add_native_item(tao::menu::MenuItem::Quit);
+
+    return (tray_menu, server_count.id());
+}
 
 #[fncmd::fncmd]
 fn main(
@@ -22,15 +57,6 @@ fn main(
 ) {
     let hostname2 = hostname.clone();
 
-    #[cfg(target_os = "linux")]
-    use tao::platform::linux::SystemTrayBuilderExtLinux;
-    use tao::{
-        event::Event,
-        event_loop::{ControlFlow, EventLoop},
-        menu::{ContextMenu as Menu, MenuItemAttributes, MenuType},
-        system_tray::SystemTrayBuilder,
-    };
-
     env_logger::init();
     let event_loop = EventLoop::new();
 
@@ -38,29 +64,7 @@ fn main(
 
     let icon = load_icon(std::path::Path::new(path));
 
-    let create_menu = move || {
-        let mut tray_menu = Menu::new();
-
-        let mut stream = TcpStream::connect((hostname.as_ref(), port)).unwrap();
-        let pong = ping(&mut stream, &hostname, port).expect("Cannot ping server");
-
-        let server_count = tray_menu.add_item(MenuItemAttributes::new(&format!(
-            "{} / {}",
-            pong.online_players, pong.max_players
-        )));
-
-        if let Some(sample) = pong.sample {
-            for player in sample {
-                tray_menu.add_item(MenuItemAttributes::new(&player.name).with_enabled(false));
-            }
-        }
-
-        tray_menu.add_native_item(tao::menu::MenuItem::Quit);
-
-        return (tray_menu, server_count.id());
-    };
-
-    let (tray_menu, mut server_count_id) = create_menu();
+    let (tray_menu, mut server_count_id) = create_menu(ping_server(&hostname, port));
 
     #[cfg(target_os = "linux")]
     let mut system_tray = SystemTrayBuilder::new(icon, Some(tray_menu))
@@ -80,8 +84,7 @@ fn main(
         loop {
             thread::sleep(Duration::from_secs(refresh));
 
-            let mut stream = TcpStream::connect((hostname2.as_ref(), port)).unwrap();
-            let pong = ping(&mut stream, &hostname2, port).expect("Cannot ping server");
+            let pong = ping_server(&hostname2, port);
 
             if let Some(mut sample) = pong.sample {
                 // todo: remove clone
@@ -124,6 +127,14 @@ fn main(
         *control_flow = ControlFlow::Wait;
 
         match event {
+            Event::TrayEvent {
+                event: TrayEvent::RightClick,
+                ..
+            } => {
+                let parts = create_menu(ping_server(&hostname, port));
+                system_tray.set_menu(&parts.0);
+                server_count_id = parts.1;
+            }
             Event::MenuEvent {
                 menu_id,
                 // specify only context menu's
@@ -131,7 +142,7 @@ fn main(
                 ..
             } => {
                 if menu_id == server_count_id {
-                    let parts = create_menu();
+                    let parts = create_menu(ping_server(&hostname, port));
                     system_tray.set_menu(&parts.0);
                     server_count_id = parts.1;
                 }
