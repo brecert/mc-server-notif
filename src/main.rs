@@ -5,6 +5,7 @@
 use std::{collections::HashSet, net::TcpStream, thread, time::Duration};
 
 use craftping::{sync::ping, Response};
+use image::GenericImageView;
 use notify_rust::Notification;
 
 #[cfg(target_os = "linux")]
@@ -14,6 +15,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoop},
     menu::{ContextMenu as Menu, MenuId, MenuItemAttributes, MenuType},
     system_tray::SystemTrayBuilder,
+    window::Icon,
 };
 
 fn ping_server(hostname: &str, port: u16) -> Response {
@@ -22,7 +24,7 @@ fn ping_server(hostname: &str, port: u16) -> Response {
     pong
 }
 
-fn create_menu(pong: Response) -> (tao::menu::ContextMenu, MenuId) {
+fn create_menu(pong: &Response) -> (tao::menu::ContextMenu, MenuId) {
     let mut tray_menu = Menu::new();
 
     let server_count = tray_menu.add_item(MenuItemAttributes::new(&format!(
@@ -30,7 +32,7 @@ fn create_menu(pong: Response) -> (tao::menu::ContextMenu, MenuId) {
         pong.online_players, pong.max_players
     )));
 
-    if let Some(sample) = pong.sample {
+    if let Some(sample) = &pong.sample {
         for player in sample {
             tray_menu.add_item(MenuItemAttributes::new(&player.name).with_enabled(false));
         }
@@ -62,9 +64,17 @@ fn main(
 
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png");
 
-    let icon = load_icon(std::path::Path::new(path));
+    let pong = ping_server(&hostname, port);
+    let (tray_menu, mut server_count_id) = create_menu(&pong);
 
-    let (tray_menu, mut server_count_id) = create_menu(ping_server(&hostname, port));
+    let icon = pong
+        .favicon
+        .and_then(|data| image::load_from_memory_with_format(&data, image::ImageFormat::Png).ok())
+        .and_then(|image| {
+            let (width, height) = image.dimensions();
+            Icon::from_rgba(image.into_rgba8().into_raw(), width, height).ok()
+        })
+        .unwrap_or_else(|| load_icon(std::path::Path::new(path)));
 
     #[cfg(target_os = "linux")]
     let mut system_tray = SystemTrayBuilder::new(icon, Some(tray_menu))
@@ -76,6 +86,8 @@ fn main(
     let mut system_tray = SystemTrayBuilder::new(icon, Some(tray_menu))
         .build(&event_loop)
         .unwrap();
+
+    // system_tray.set_icon(Icon);
 
     thread::spawn(move || {
         let mut player_count = 0;
@@ -131,7 +143,7 @@ fn main(
                 event: TrayEvent::RightClick,
                 ..
             } => {
-                let parts = create_menu(ping_server(&hostname, port));
+                let parts = create_menu(&ping_server(&hostname, port));
                 system_tray.set_menu(&parts.0);
                 server_count_id = parts.1;
             }
@@ -142,7 +154,7 @@ fn main(
                 ..
             } => {
                 if menu_id == server_count_id {
-                    let parts = create_menu(ping_server(&hostname, port));
+                    let parts = create_menu(&ping_server(&hostname, port));
                     system_tray.set_menu(&parts.0);
                     server_count_id = parts.1;
                 }
