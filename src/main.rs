@@ -1,5 +1,6 @@
+#![feature(drain_filter)]
 #![feature(string_remove_matches)]
-
+#![feature(iter_intersperse)]
 use std::{collections::HashSet, net::TcpStream, thread, time::Duration};
 
 use craftping::sync::ping;
@@ -18,21 +19,8 @@ fn main(
     /// How often to check and refresh the server for new players in seconds.
     #[opt(long, short, default_value_t = 30)]
     refresh: u64,
-
-    /// Players to notify for, UUID or Username
-    #[opt(long, short = 'o')]
-    players: Vec<String>,
 ) {
     let hostname2 = hostname.clone();
-
-    // remove uuid `-`
-    let players: HashSet<String> = players
-        .into_iter()
-        .map(|mut p| {
-            p.remove_matches("-");
-            p
-        })
-        .collect();
 
     #[cfg(target_os = "linux")]
     use tao::platform::linux::SystemTrayBuilderExtLinux;
@@ -46,7 +34,7 @@ fn main(
     env_logger::init();
     let event_loop = EventLoop::new();
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/icon.png");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png");
 
     let icon = load_icon(std::path::Path::new(path));
 
@@ -75,8 +63,8 @@ fn main(
     let (tray_menu, mut server_count_id) = create_menu();
 
     #[cfg(target_os = "linux")]
-    let system_tray = SystemTrayBuilder::new(icon, Some(tray_menu))
-        .with_temp_icon_dir(std::path::Path::new("/tmp/mctray"))
+    let mut system_tray = SystemTrayBuilder::new(icon, Some(tray_menu))
+        .with_temp_icon_dir(std::path::Path::new("/tmp/minecraft-notifications"))
         .build(&event_loop)
         .unwrap();
 
@@ -86,40 +74,48 @@ fn main(
         .unwrap();
 
     thread::spawn(move || {
-        let mut current: HashSet<String> = HashSet::with_capacity(players.len());
+        let mut player_count = 0;
+        let mut current: HashSet<String> = HashSet::new();
+
         loop {
             thread::sleep(Duration::from_secs(refresh));
 
             let mut stream = TcpStream::connect((hostname2.as_ref(), port)).unwrap();
             let pong = ping(&mut stream, &hostname2, port).expect("Cannot ping server");
 
-            if let Some(sample) = pong.sample {
-                let players_that_matter = sample
-                    .into_iter()
-                    .filter(|p| players.contains(&p.id) || players.contains(&p.name));
-
-                let ids: HashSet<String> = players_that_matter
-                    .map(|p| {
-                        let mut id = p.id;
-                        id.remove_matches("-");
-                        id
-                    })
-                    .collect();
+            if let Some(mut sample) = pong.sample {
+                // todo: remove clone
+                let ids: HashSet<String> = sample.iter().map(|p| p.id.clone()).collect();
 
                 let diff = &ids - &current;
 
-                if diff.contains("7a8084cd1f444a159bb1eef8d5b535a1") {
+                if diff.len() > 0 {
+                    let names: String = sample
+                        .drain_filter(|p| diff.contains(&p.id))
+                        .map(|p| p.name)
+                        .intersperse_with(|| ", ".into())
+                        .collect();
+
                     Notification::new()
-                        .summary(&format!("brecert joined {hostname2}:{port}"))
+                        .summary(&format!("{names} joined {hostname2}:{port}"))
+                        .appname("minecraft-notif")
+                        .auto_icon()
+                        .show()
+                        .expect("Unable to create notification");
+                } else if player_count > pong.online_players {
+                    Notification::new()
+                        .summary(&format!("An unknown player joined {hostname2}:{port}"))
+                        .appname("minecraft-notif")
+                        .auto_icon()
                         .show()
                         .expect("Unable to create notification");
                 }
 
-                dbg!(&ids);
-
                 current = ids;
+                player_count = pong.online_players;
             } else {
                 current.clear();
+                player_count = 0;
             }
         }
     });
