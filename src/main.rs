@@ -18,6 +18,8 @@ use tao::{
     window::Icon,
 };
 
+const ICON: &[u8] = include_bytes!("../assets/icon.png");
+
 fn ping_server(hostname: &str, port: u16) -> Response {
     let mut stream = TcpStream::connect((hostname.as_ref(), port)).unwrap();
     let pong = ping(&mut stream, &hostname, port).expect("Cannot ping server");
@@ -62,8 +64,6 @@ fn main(
     env_logger::init();
     let event_loop = EventLoop::new();
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png");
-
     let pong = ping_server(&hostname, port);
     let (tray_menu, mut server_count_id) = create_menu(&pong);
 
@@ -74,7 +74,12 @@ fn main(
             let (width, height) = image.dimensions();
             Icon::from_rgba(image.into_rgba8().into_raw(), width, height).ok()
         })
-        .unwrap_or_else(|| load_icon(std::path::Path::new(path)));
+        .unwrap_or_else(|| {
+            let image = image::load_from_memory(ICON).expect("Unable to load default icon");
+            let (width, height) = image.dimensions();
+            Icon::from_rgba(image.into_rgba8().into_raw(), width, height)
+                .expect("Unable to convert default icon to an icon")
+        });
 
     #[cfg(target_os = "linux")]
     let mut system_tray = SystemTrayBuilder::new(icon, Some(tray_menu))
@@ -162,17 +167,4 @@ fn main(
             _ => (),
         }
     });
-}
-
-fn load_icon(path: &std::path::Path) -> tao::system_tray::Icon {
-    let (icon_rgba, icon_width, icon_height) = {
-        let image = image::open(path)
-            .expect("Failed to open icon path")
-            .into_rgba8();
-        let (width, height) = image.dimensions();
-        let rgba = image.into_raw();
-        (rgba, width, height)
-    };
-    tao::system_tray::Icon::from_rgba(icon_rgba, icon_width, icon_height)
-        .expect("Failed to open icon")
 }
